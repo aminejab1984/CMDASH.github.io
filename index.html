@@ -1559,28 +1559,21 @@ document.getElementById('unlockBtn').addEventListener('click', unlockImport);
 /* ════════════ GITHUB PAGES — DATA.JSON ════════════ */
 const DATA_JSON_URL='./data.json';
 
-function downloadDataJson(metaData=meta, recordsData=records){
-  const payload={meta:metaData,records:recordsData,savedAt:new Date().toISOString()};
-  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='data.json';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-  showStatus('✅ data.json téléchargé — remplacez le fichier data.json dans GitHub');
-}
-
-/* Après un import, le navigateur ne peut pas écrire directement dans GitHub.
-   On génère donc automatiquement le data.json à envoyer dans le dépôt. */
+/* GitHub Pages est statique : après l'import, on conserve les données
+   dans le navigateur. Aucun téléchargement/remplacement de data.json
+   n'est déclenché automatiquement. */
 async function saveToCloud(metaData, recordsData, savedAt){
   try{
-    downloadDataJson(metaData,recordsData);
-    return {ok:true,rowCount:recordsData.length};
+    localStorage.setItem('gpl_v2_data',JSON.stringify({
+      meta:metaData,
+      records:recordsData,
+      savedAt:savedAt
+    }));
+    showStatus('✅ Données enregistrées dans ce navigateur — aucun remplacement de data.json demandé.');
+    return {ok:true,rowCount:recordsData.length,local:true};
   }catch(e){
-    console.error('data.json export:',e);
-    showStatus('⚠️ Données chargées, mais création de data.json impossible : '+(e.message||e),true);
+    console.error('Sauvegarde locale:',e);
+    showStatus('⚠️ Données chargées, mais sauvegarde locale impossible : '+(e.message||e),true);
     return null;
   }
 }
@@ -1605,10 +1598,30 @@ async function loadFromDataJson(){
   }
 }
 
-/* Au démarrage, GitHub Pages charge uniquement le fichier statique data.json.
-   Aucun appel Netlify n'est effectué. */
+/* Au démarrage :
+   1) on reprend d'abord les données importées dans ce navigateur ;
+   2) sinon on charge le data.json publié sur GitHub. */
+async function loadFromLocalStorage(){
+  try{
+    const raw=localStorage.getItem('gpl_v2_data');
+    if(!raw) return false;
+    const p=JSON.parse(raw);
+    if(!p || !Array.isArray(p.records) || !p.records.length) return false;
+    records.length=0;
+    p.records.forEach(r=>records.push(r));
+    Object.assign(meta,p.meta||{});
+    populateFilters(); updateMeta(); refresh();
+    showStatus('💾 Données locales chargées — '+fInt(p.records.length)+' lignes');
+    return true;
+  }catch(e){
+    console.warn('Données locales invalides:',e);
+    return false;
+  }
+}
+
 (async function restore(){
-  await loadFromDataJson();
+  const localLoaded=await loadFromLocalStorage();
+  if(!localLoaded) await loadFromDataJson();
 })();
 
 /* ════════════ AUTO-FIT KPI VALUES ════════════ */
