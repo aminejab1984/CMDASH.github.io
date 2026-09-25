@@ -1556,76 +1556,59 @@ document.getElementById('unlockBtn').addEventListener('click', unlockImport);
   };
 })();
 
-/* ════════════ CLOUD STORAGE — NETLIFY BLOBS (CHUNKED) ════════════ */
-const CLOUD_API='/.netlify/functions/data';
-const CLOUD_CHUNK_SIZE=2500000; // ~2.5 MB, safely below Netlify Function 6 MB request limit
+/* ════════════ GITHUB PAGES — DATA.JSON ════════════ */
+const DATA_JSON_URL='./data.json';
 
+function downloadDataJson(metaData=meta, recordsData=records){
+  const payload={meta:metaData,records:recordsData,savedAt:new Date().toISOString()};
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='data.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  showStatus('✅ data.json téléchargé — remplacez le fichier data.json dans GitHub');
+}
+
+/* Après un import, le navigateur ne peut pas écrire directement dans GitHub.
+   On génère donc automatiquement le data.json à envoyer dans le dépôt. */
 async function saveToCloud(metaData, recordsData, savedAt){
   try{
-    showStatus('☁️ Préparation de la sauvegarde serveur…');
-    const payload=JSON.stringify({meta:metaData,records:recordsData,savedAt});
-    const total=Math.max(1,Math.ceil(payload.length/CLOUD_CHUNK_SIZE));
-    const uploadId=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
-
-    for(let i=0;i<total;i++){
-      const chunk=payload.slice(i*CLOUD_CHUNK_SIZE,(i+1)*CLOUD_CHUNK_SIZE);
-      showStatus(`☁️ Sauvegarde serveur : partie ${i+1}/${total}…`);
-      const res=await fetch(CLOUD_API,{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({uploadId,index:i,total,chunk})
-      });
-      if(!res.ok) throw new Error((await res.text())||('HTTP '+res.status));
-    }
-    showStatus('☁️ Données sauvegardées sur le serveur — '+fInt(recordsData.length)+' lignes');
-    return {ok:true,rowCount:recordsData.length,chunks:total};
+    downloadDataJson(metaData,recordsData);
+    return {ok:true,rowCount:recordsData.length};
   }catch(e){
-    console.error('Cloud save:',e);
-    showStatus('⚠️ Données chargées mais sauvegarde serveur impossible : '+(e.message||e),true);
+    console.error('data.json export:',e);
+    showStatus('⚠️ Données chargées, mais création de data.json impossible : '+(e.message||e),true);
     return null;
   }
 }
 
-async function loadFromCloud(){
+async function loadFromDataJson(){
   try{
-    const mr=await fetch(CLOUD_API+'?manifest=1&ts='+Date.now(),{cache:'no-store'});
-    if(!mr.ok) throw new Error('HTTP '+mr.status);
-    const manifest=await mr.json();
-    if(!manifest || !manifest.total) return false;
-
-    const parts=[];
-    for(let i=0;i<Number(manifest.total);i++){
-      const r=await fetch(CLOUD_API+'?chunk='+i+'&uploadId='+encodeURIComponent(manifest.uploadId)+'&ts='+Date.now(),{cache:'no-store'});
-      if(!r.ok) throw new Error('HTTP '+r.status+' sur la partie '+(i+1));
-      const d=await r.json();
-      if(typeof d.chunk!=='string') throw new Error('Partie serveur invalide : '+(i+1));
-      parts.push(d.chunk);
-    }
-    const p=JSON.parse(parts.join(''));
-    if(!p || !Array.isArray(p.records) || !p.records.length) return false;
-    records.length=0; p.records.forEach(r=>records.push(r));
+    const r=await fetch(DATA_JSON_URL+'?ts='+Date.now(),{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const p=await r.json();
+    if(!p || !Array.isArray(p.records)) throw new Error('data.json invalide');
+    records.length=0;
+    p.records.forEach(r=>records.push(r));
     Object.assign(meta,p.meta||{});
-    try{localStorage.setItem('gpl_v2_data',JSON.stringify(p));}catch(e){}
-    populateFilters(); updateMeta(); refresh(); lockUpload(p.savedAt||'');
-    showStatus('☁️ Données restaurées depuis le serveur — '+fInt(p.records.length)+' lignes');
+    populateFilters(); updateMeta(); refresh();
+    if(p.records.length){
+      showStatus('☁️ data.json chargé depuis GitHub — '+fInt(p.records.length)+' lignes');
+    }
     return true;
   }catch(e){
-    console.warn('Cloud restore:',e);
+    console.warn('data.json introuvable ou invalide:',e);
     return false;
   }
 }
 
-async function deleteCloudData(){
-  try{ await fetch(CLOUD_API,{method:'DELETE'}); }catch(e){ console.warn('Cloud delete:',e); }
-}
-
-/* ════════════ RESTORE SERVEUR ════════════
-   Au démarrage du dashboard déployé (GitHub/Netlify), les données
-   sauvegardées sur Netlify sont restaurées automatiquement.
-   IMPORTANT : on ne restaure PAS le localStorage comme source de secours,
-   afin d'éviter de réafficher d'anciennes données locales.
-*/
+/* Au démarrage, GitHub Pages charge uniquement le fichier statique data.json.
+   Aucun appel Netlify n'est effectué. */
 (async function restore(){
-  await loadFromCloud();
+  await loadFromDataJson();
 })();
 
 /* ════════════ AUTO-FIT KPI VALUES ════════════ */
