@@ -1153,9 +1153,7 @@ document.getElementById('exportBtn').addEventListener('click',()=>exportCSV(wind
 document.getElementById('resetDataBtn').addEventListener('click',()=>{
   if(!confirm(`⚠️ Vider toutes les données ? Le dashboard sera vide jusqu'au prochain import.`)) return;
 
-  // Vider localStorage
-  try{ localStorage.removeItem('gpl_v2_data'); }catch(e){}
-  deleteCloudData();
+  // Aucune sauvegarde distante : le reset agit uniquement sur les données en mémoire.
 
   // Vider les données en mémoire
   records.length = 0;
@@ -1479,8 +1477,9 @@ async function applyMapping(){
   const crbtColumnName = idx.crbt!==undefined ? _rawHdrs[idx.crbt] : 'Non associée';
   showStatus(`✅ ${fInt(newR.length)} lignes chargées — CRBT depuis "${crbtColumnName}" : ${fCur(importedCRBT)} — "${newMeta.sourceFile}"`);
   const savedAt=new Date().toLocaleString('fr-FR');
+  // IMPORTANT : l'import ne sauvegarde rien sur GitHub, Netlify ou localStorage.
+  // Les données restent uniquement en mémoire jusqu'au prochain rechargement.
   lockUpload(savedAt);
-  saveToCloud(newMeta,newR,savedAt);
 }
 
 function lockUpload(savedAt){
@@ -1554,80 +1553,14 @@ document.getElementById('unlockBtn').addEventListener('click', unlockImport);
   };
 })();
 
-/* ════════════ GITHUB PAGES — DATA.JSON ════════════ */
-const DATA_JSON_URL='./data.json';
-
-/*
-   Les données peuvent dépasser la limite de localStorage (environ 5 MiB par
-   origine). On utilise donc IndexedDB pour conserver les milliers de lignes
-   importées dans le navigateur. Les préférences légères (thème, panneau,
-   etc.) continuent d'utiliser localStorage.
+/* ════════════ GITHUB PAGES — LECTURE SEULE DE data.json ════════════
+   IMPORTANT :
+   - Le dashboard LIT data.json au démarrage.
+   - Il NE MODIFIE JAMAIS data.json.
+   - Il NE fait aucun POST/PUT/DELETE vers GitHub ou Netlify.
+   - Après un Upload, les données sont uniquement en mémoire.
 */
-const GPL_DB_NAME='gpl_dashboard_data';
-const GPL_DB_VERSION=1;
-const GPL_DB_STORE='dashboard';
-
-function openGplDataDB(){
-  return new Promise((resolve,reject)=>{
-    if(!('indexedDB' in window)){
-      reject(new Error('IndexedDB non disponible dans ce navigateur.'));
-      return;
-    }
-    const req=indexedDB.open(GPL_DB_NAME,GPL_DB_VERSION);
-    req.onupgradeneeded=()=>{
-      const db=req.result;
-      if(!db.objectStoreNames.contains(GPL_DB_STORE)) db.createObjectStore(GPL_DB_STORE);
-    };
-    req.onsuccess=()=>resolve(req.result);
-    req.onerror=()=>reject(req.error||new Error('Impossible d’ouvrir le stockage local.'));
-  });
-}
-
-async function saveBrowserData(metaData,recordsData,savedAt){
-  const db=await openGplDataDB();
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(GPL_DB_STORE,'readwrite');
-    tx.objectStore(GPL_DB_STORE).put({meta:metaData,records:recordsData,savedAt},'current');
-    tx.oncomplete=()=>{db.close();resolve(true);};
-    tx.onerror=()=>{const e=tx.error||new Error('Erreur IndexedDB.');db.close();reject(e);};
-    tx.onabort=()=>{const e=tx.error||new Error('Sauvegarde IndexedDB interrompue.');db.close();reject(e);};
-  });
-}
-
-async function readBrowserData(){
-  const db=await openGplDataDB();
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(GPL_DB_STORE,'readonly');
-    const req=tx.objectStore(GPL_DB_STORE).get('current');
-    req.onsuccess=()=>{const v=req.result||null;db.close();resolve(v);};
-    req.onerror=()=>{const e=req.error||new Error('Lecture IndexedDB impossible.');db.close();reject(e);};
-  });
-}
-
-async function clearBrowserData(){
-  try{
-    const db=await openGplDataDB();
-    await new Promise((resolve,reject)=>{
-      const tx=db.transaction(GPL_DB_STORE,'readwrite');
-      tx.objectStore(GPL_DB_STORE).delete('current');
-      tx.oncomplete=resolve;
-      tx.onerror=()=>reject(tx.error);
-    });
-    db.close();
-  }catch(e){ console.warn('Suppression IndexedDB:',e); }
-}
-
-async function saveToCloud(metaData,recordsData,savedAt){
-  try{
-    await saveBrowserData(metaData,recordsData,savedAt);
-    showStatus('✅ Données enregistrées dans ce navigateur — aucune demande de remplacement de data.json.');
-    return {ok:true,rowCount:recordsData.length,local:true};
-  }catch(e){
-    console.error('Sauvegarde IndexedDB:',e);
-    showStatus('⚠️ Données chargées, mais sauvegarde locale impossible : '+(e.message||e),true);
-    return null;
-  }
-}
+const DATA_JSON_URL='./data.json';
 
 async function loadFromDataJson(){
   try{
@@ -1635,57 +1568,28 @@ async function loadFromDataJson(){
     if(!r.ok) throw new Error('HTTP '+r.status);
     const p=await r.json();
     if(!p || !Array.isArray(p.records)) throw new Error('data.json invalide');
+
     records.length=0;
     p.records.forEach(r=>records.push(r));
     Object.assign(meta,p.meta||{});
-    populateFilters(); updateMeta(); refresh();
-    if(p.records.length) showStatus('☁️ data.json chargé depuis GitHub — '+fInt(p.records.length)+' lignes');
-    return true;
-  }catch(e){
-    console.warn('data.json introuvable ou invalide:',e);
-    return false;
-  }
-}
 
-/* Au démarrage :
-   1) on reprend les données importées dans ce navigateur via IndexedDB ;
-   2) sinon on charge le data.json publié sur GitHub.
-*/
-async function loadFromLocalStorage(){
-  try{
-    let p=await readBrowserData();
+    populateFilters();
+    updateMeta();
+    refresh();
 
-    /* Migration éventuelle d'une ancienne petite sauvegarde localStorage. */
-    if(!p){
-      const raw=localStorage.getItem('gpl_v2_data');
-      if(raw){
-        try{
-          const old=JSON.parse(raw);
-          if(old && Array.isArray(old.records) && old.records.length){
-            p=old;
-            await saveBrowserData(old.meta||{},old.records,old.savedAt||'');
-            localStorage.removeItem('gpl_v2_data');
-          }
-        }catch(e){ console.warn('Ancienne sauvegarde locale invalide:',e); }
-      }
+    if(p.records.length){
+      lockUpload(p.savedAt||'');
+      showStatus('☁️ data.json chargé depuis GitHub — '+fInt(p.records.length)+' lignes');
     }
-
-    if(!p || !Array.isArray(p.records) || !p.records.length) return false;
-    records.length=0;
-    p.records.forEach(r=>records.push(r));
-    Object.assign(meta,p.meta||{});
-    populateFilters(); updateMeta(); refresh();
-    showStatus('💾 Données locales chargées — '+fInt(p.records.length)+' lignes');
     return true;
   }catch(e){
-    console.warn('Données locales invalides:',e);
+    console.warn('data.json non chargé :',e);
     return false;
   }
 }
 
 (async function restore(){
-  const localLoaded=await loadFromLocalStorage();
-  if(!localLoaded) await loadFromDataJson();
+  await loadFromDataJson();
 })();
 
 /* ════════════ AUTO-FIT KPI VALUES ════════════ */
